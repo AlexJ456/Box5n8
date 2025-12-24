@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!app || !canvas || !ctx) {
         return;
     }
+
     const layoutHost = canvas.parentElement || document.querySelector('.container');
     const initialWidth = layoutHost ? layoutHost.clientWidth : canvas.clientWidth;
     const initialHeight = layoutHost ? layoutHost.clientHeight : canvas.clientHeight;
@@ -20,7 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
         timeLimitReached: false,
         phaseTime: 4,
         pulseStartTime: null,
-        devicePixelRatio: Math.min(window.devicePixelRatio || 1, 1.75),
+        devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
         viewportWidth: initialWidth,
         viewportHeight: initialHeight,
         prefersReducedMotion: false,
@@ -28,7 +29,129 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     let wakeLock = null;
-    let audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Audio setup
+    let audioContext = null;
+    let masterGain = null;
+    let ambienceBus = null; // subtle filtered delay bus
+
+    function ensureAudio() {
+        if (!audioContext) {
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            audioContext = new Ctx();
+            masterGain = audioContext.createGain();
+            masterGain.gain.setValueAtTime(state.soundEnabled ? 0.9 : 0.0, audioContext.currentTime);
+
+            // Create a very subtle ambience bus (filtered short delay) for a soft tail
+            const delay = audioContext.createDelay(0.5);
+            delay.delayTime.value = 0.12;
+
+            const feedback = audioContext.createGain();
+            feedback.gain.value = 0.18;
+
+            const toneFilter = audioContext.createBiquadFilter();
+            toneFilter.type = 'lowpass';
+            toneFilter.frequency.value = 3200;
+
+            const ambienceFilter = audioContext.createBiquadFilter();
+            ambienceFilter.type = 'lowpass';
+            ambienceFilter.frequency.value = 1800;
+
+            delay.connect(feedback).connect(ambienceFilter).connect(delay);
+
+            ambienceBus = audioContext.createGain();
+            ambienceBus.gain.value = 0.18;
+
+            // Route: tones -> toneFilter -> master + (split to) delay -> master
+            toneFilter.connect(masterGain);
+            toneFilter.connect(delay);
+            delay.connect(ambienceBus);
+
+            ambienceBus.connect(masterGain);
+            masterGain.connect(audioContext.destination);
+
+            // Keep references to shared nodes
+            ensureAudio.toneFilter = toneFilter;
+        }
+    }
+
+    function updateAudioRouting() {
+        if (!audioContext) return;
+        const t = audioContext.currentTime;
+        masterGain.gain.cancelScheduledValues(t);
+        masterGain.gain.setValueAtTime(masterGain.gain.value, t);
+        masterGain.gain.linearRampToValueAtTime(state.soundEnabled ? 0.9 : 0.0, t + 0.05);
+    }
+
+    // Pleasant chime per phase (soft ADSR, dual-osc detune, gentle filter sweep)
+    // Phase map: 0=Inhale, 1=Hold, 2=Exhale, 3=Wait
+    const phaseFrequencies = [440.00, 523.25, 329.63, 293.66]; // A4, C5, E4, D4
+    const phasePan = [-0.12, 0.0, 0.12, 0.0];
+
+    function playCue(phaseIndex = 0) {
+        if (!state.soundEnabled) return;
+        ensureAudio();
+        if (audioContext.state === 'suspended') {
+            // Will resume on user gesture; guard anyway
+            audioContext.resume().catch(() => {});
+        }
+
+        const t0 = audioContext.currentTime + 0.005;
+        const dur = 0.38;
+
+        const osc1 = audioContext.createOscillator();
+        const osc2 = audioContext.createOscillator();
+        const pan = audioContext.createStereoPanner ? audioContext.createStereoPanner() : null;
+        const g = audioContext.createGain();
+        const f = audioContext.createBiquadFilter();
+
+        const baseFreq = phaseFrequencies[phaseIndex % 4];
+        osc1.type = 'sine';
+        osc2.type = 'triangle';
+        osc1.frequency.setValueAtTime(baseFreq, t0);
+        osc2.frequency.setValueAtTime(baseFreq * Math.pow(2, 3 / 1200), t0); // +3 cents detune
+
+        // Envelope (soft attack, quick decay to a warm sustain, short release)
+        const attack = 0.01;
+        const decay = 0.15;
+        const sustain = 0.35;
+        const release = 0.14;
+
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(0.9, t0 + attack);
+        g.gain.linearRampToValueAtTime(sustain, t0 + attack + decay);
+        g.gain.setValueAtTime(sustain, t0 + dur);
+        g.gain.linearRampToValueAtTime(0.0001, t0 + dur + release);
+
+        // Gentle filter sweep to soften the transient
+        f.type = 'lowpass';
+        f.frequency.setValueAtTime(3800, t0);
+        f.frequency.exponentialRampToValueAtTime(1900, t0 + dur);
+
+        // Optional subtle stereo placement by phase
+        if (pan) {
+            pan.pan.setValueAtTime(phasePan[phaseIndex % 4] || 0, t0);
+        }
+
+        // Connect graph: osc -> gain -> filter -> shared toneFilter -> master/delay (configured in ensureAudio)
+        const toneFilter = ensureAudio.toneFilter;
+        osc1.connect(g);
+        osc2.connect(g);
+        g.connect(f);
+        if (pan) {
+            f.connect(pan);
+            pan.connect(toneFilter);
+        } else {
+            f.connect(toneFilter);
+        }
+
+        osc1.start(t0);
+        osc2.start(t0);
+        // Stop after envelope finishes
+        const stopAt = t0 + dur + release + 0.02;
+        osc1.stop(stopAt);
+        osc2.stop(stopAt);
+    }
 
     const icons = {
         play: `<svg class="icon" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>`,
@@ -77,7 +200,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const rect = currentSizingElement.getBoundingClientRect();
         const width = rect.width;
         const height = rect.height;
-        const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.75);
+        const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
 
         state.viewportWidth = width;
         state.viewportHeight = height;
@@ -127,21 +250,6 @@ document.addEventListener('DOMContentLoaded', () => {
         return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     }
 
-    function playTone() {
-        if (state.soundEnabled && audioContext) {
-            try {
-                const oscillator = audioContext.createOscillator();
-                oscillator.type = 'sine';
-                oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
-                oscillator.connect(audioContext.destination);
-                oscillator.start();
-                oscillator.stop(audioContext.currentTime + 0.1);
-            } catch (e) {
-                console.error('Error playing tone:', e);
-            }
-        }
-    }
-
     let interval;
     let animationFrameId;
     let lastStateUpdate;
@@ -150,35 +258,26 @@ document.addEventListener('DOMContentLoaded', () => {
         if ('wakeLock' in navigator) {
             try {
                 wakeLock = await navigator.wakeLock.request('screen');
-                console.log('Wake lock is active');
             } catch (err) {
                 console.error('Failed to acquire wake lock:', err);
             }
-        } else {
-            console.log('Wake Lock API not supported');
         }
     }
 
     function releaseWakeLock() {
         if (wakeLock !== null) {
             wakeLock.release()
-                .then(() => {
-                    wakeLock = null;
-                    console.log('Wake lock released');
-                })
-                .catch(err => {
-                    console.error('Failed to release wake lock:', err);
-                });
+                .then(() => { wakeLock = null; })
+                .catch(err => { console.error('Failed to release wake lock:', err); });
         }
     }
 
     function togglePlay() {
         state.isPlaying = !state.isPlaying;
         if (state.isPlaying) {
+            ensureAudio();
             if (audioContext && audioContext.state === 'suspended') {
-                audioContext.resume().then(() => {
-                    console.log('AudioContext resumed');
-                });
+                audioContext.resume().catch(() => {});
             }
             state.hasStarted = true;
             state.totalTime = 0;
@@ -187,7 +286,7 @@ document.addEventListener('DOMContentLoaded', () => {
             state.sessionComplete = false;
             state.timeLimitReached = false;
             state.pulseStartTime = performance.now();
-            playTone();
+            playCue(0);
             startInterval();
             animate();
             requestWakeLock();
@@ -228,6 +327,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function toggleSound() {
         state.soundEnabled = !state.soundEnabled;
+        ensureAudio();
+        if (audioContext && audioContext.state === 'suspended') {
+            audioContext.resume().catch(() => {});
+        }
+        updateAudioRouting();
         render();
     }
 
@@ -245,12 +349,11 @@ document.addEventListener('DOMContentLoaded', () => {
         state.timeLimitReached = false;
         state.pulseStartTime = performance.now();
         state.hasStarted = true;
+        ensureAudio();
         if (audioContext && audioContext.state === 'suspended') {
-            audioContext.resume().then(() => {
-                console.log('AudioContext resumed');
-            });
+            audioContext.resume().catch(() => {});
         }
-        playTone();
+        playCue(0);
         startInterval();
         animate();
         requestWakeLock();
@@ -272,7 +375,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 state.count = (state.count + 1) % 4;
                 state.pulseStartTime = performance.now();
                 state.countdown = state.phaseTime;
-                playTone();
+                playCue(state.count);
                 if (state.count === 3 && state.timeLimitReached) {
                     state.sessionComplete = true;
                     state.isPlaying = false;
@@ -294,9 +397,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const width = state.viewportWidth || canvas.clientWidth || canvas.width;
         const height = state.viewportHeight || canvas.clientHeight || canvas.height;
-        if (!width || !height) {
-            return;
-        }
+        if (!width || !height) return;
 
         const scale = state.devicePixelRatio || 1;
         ctx.save();
@@ -312,10 +413,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const clampedProgress = Math.max(0, Math.min(1, progress));
         const easedProgress = 0.5 - (Math.cos(Math.PI * clampedProgress) / 2);
-        const baseSize = Math.min(width, height) * 0.6;
+
+        // Reserve some space vertically so UI never overlaps artwork on very small screens
+        const baseSize = Math.min(width, height) * 0.62;
         const topMargin = 20;
         const sizeWithoutBreath = Math.min(baseSize, height - topMargin * 2);
-        const verticalOffset = Math.min(height * 0.18, 110);
+        const verticalOffset = Math.min(height * 0.18, 120);
         const preferredTop = height / 2 + verticalOffset - sizeWithoutBreath / 2;
         const top = Math.max(topMargin, Math.min(preferredTop, height - sizeWithoutBreath - topMargin));
         const left = (width - sizeWithoutBreath) / 2;
@@ -344,6 +447,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const size = sizeWithoutBreath * (1 + 0.08 * breathInfluence + 0.03 * pulseBoost);
         const adjustedLeft = left + (sizeWithoutBreath - size) / 2;
         const adjustedTop = top + (sizeWithoutBreath - size) / 2;
+
         const points = [
             { x: adjustedLeft, y: adjustedTop + size },
             { x: adjustedLeft, y: adjustedTop },
@@ -375,15 +479,17 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.fillStyle = cachedGradient;
         ctx.fillRect(0, 0, width, height);
 
-        ctx.strokeStyle = hexToRgba('#fcd34d', 0.25);
+        // Subtle guide square
+        ctx.strokeStyle = hexToRgba('#fcd34d', 0.22);
         ctx.lineWidth = Math.max(2, size * 0.015);
         ctx.lineJoin = 'round';
         ctx.strokeRect(adjustedLeft, adjustedTop, size, size);
 
+        // Trail/path
         ctx.lineWidth = Math.max(4, size * 0.03);
-        ctx.strokeStyle = hexToRgba(accentColor, shouldShowTrail ? 0.8 : 0.45);
-        ctx.shadowColor = hexToRgba(accentColor, 0.5);
-        ctx.shadowBlur = shouldShowTrail ? 15 : 8;
+        ctx.strokeStyle = hexToRgba(accentColor, shouldShowTrail ? 0.82 : 0.45);
+        ctx.shadowColor = hexToRgba(accentColor, 0.55);
+        ctx.shadowBlur = shouldShowTrail ? 16 : 9;
         ctx.beginPath();
         ctx.moveTo(points[0].x, points[0].y);
         for (let i = 1; i <= phase; i++) {
@@ -395,6 +501,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.stroke();
         ctx.shadowBlur = 0;
 
+        // Moving node
         const baseRadius = Math.max(8, size * 0.04);
         let radius = baseRadius * (1 + 0.35 * breathInfluence + 0.25 * pulseBoost);
         if (allowMotion && (phase === 1 || phase === 3)) {
@@ -434,13 +541,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function render() {
         let html = `
-            <h1>Box Breathing</h1>
+            <h1 class="brand-title">Box Breathing</h1>
         `;
         if (state.isPlaying) {
             html += `
-                <div class="timer">Total Time: ${formatTime(state.totalTime)}</div>
-                <div class="instruction">${getInstruction(state.count)}</div>
-                <div class="countdown">${state.countdown}</div>
+                <div class="timer" role="status" aria-live="polite">Total: ${formatTime(state.totalTime)}</div>
+                <div class="instruction" role="status" aria-live="polite">${getInstruction(state.count)}</div>
+                <div class="countdown" role="status" aria-live="polite">${state.countdown}</div>
             `;
             const phases = ['Inhale', 'Hold', 'Exhale', 'Wait'];
             html += `<div class="phase-tracker">`;
@@ -462,28 +569,31 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (!state.isPlaying && !state.sessionComplete) {
             html += `
-                <div class="settings">
+                <div class="settings card">
                     <div class="form-group">
                         <label class="switch">
-                            <input type="checkbox" id="sound-toggle" ${state.soundEnabled ? 'checked' : ''}>
+                            <input type="checkbox" id="sound-toggle" ${state.soundEnabled ? 'checked' : ''} aria-label="Toggle sound">
                             <span class="slider"></span>
                         </label>
-                        <label for="sound-toggle">
+                        <label for="sound-toggle" class="switch-label">
                             ${state.soundEnabled ? icons.volume2 : icons.volumeX}
-                            Sound ${state.soundEnabled ? 'On' : 'Off'}
+                            <span>${state.soundEnabled ? 'Sound On' : 'Sound Off'}</span>
                         </label>
                     </div>
-                    <div class="form-group">
-                        <input
-                            type="number"
-                            inputmode="numeric"
-                            placeholder="Time limit (minutes)"
-                            value="${state.timeLimit}"
-                            id="time-limit"
-                            step="1"
-                            min="0"
-                        >
-                        <label for="time-limit">Minutes (optional)</label>
+                    <div class="form-group input-row">
+                        <div class="input-wrap">
+                            <input
+                                type="number"
+                                inputmode="numeric"
+                                placeholder="Minutes"
+                                value="${state.timeLimit}"
+                                id="time-limit"
+                                step="1"
+                                min="0"
+                                aria-label="Time limit in minutes (optional)"
+                            >
+                            <label for="time-limit" class="floating">Time limit (optional)</label>
+                        </div>
                     </div>
                 </div>
                 <div class="prompt">Press start to begin</div>
@@ -494,7 +604,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (!state.sessionComplete) {
             html += `
-                <button id="toggle-play">
+                <button id="toggle-play" class="primary">
                     ${state.isPlaying ? icons.pause : icons.play}
                     ${state.isPlaying ? 'Pause' : 'Start'}
                 </button>
@@ -502,15 +612,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (!state.isPlaying && !state.sessionComplete) {
             html += `
-                <div class="slider-container">
+                <div class="slider-container card">
                     <label for="phase-time-slider">Phase Time (seconds): <span id="phase-time-value">${state.phaseTime}</span></label>
-                    <input type="range" min="3" max="6" step="1" value="${state.phaseTime}" id="phase-time-slider">
+                    <input type="range" min="3" max="6" step="1" value="${state.phaseTime}" id="phase-time-slider" aria-label="Phase time in seconds">
                 </div>
             `;
         }
         if (state.sessionComplete) {
             html += `
-                <button id="reset">
+                <button id="reset" class="secondary">
                     ${icons.rotateCcw}
                     Back to Start
                 </button>
@@ -519,13 +629,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!state.isPlaying && !state.sessionComplete) {
             html += `
                 <div class="shortcut-buttons">
-                    <button id="preset-2min" class="preset-button">
+                    <button id="preset-2min" class="preset-button chip">
                         ${icons.clock} 2 min
                     </button>
-                    <button id="preset-5min" class="preset-button">
+                    <button id="preset-5min" class="preset-button chip">
                         ${icons.clock} 5 min
                     </button>
-                    <button id="preset-10min" class="preset-button">
+                    <button id="preset-10min" class="preset-button chip">
                         ${icons.clock} 10 min
                     </button>
                 </div>
@@ -561,4 +671,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     render();
     resizeCanvas();
+
+    // Accessibility: reduce accidental overscroll bounce in PWA
+    document.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 1) e.preventDefault();
+    }, { passive: false });
 });

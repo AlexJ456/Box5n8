@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Box Breathing</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: black;
+            color: #ffedd5;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        /* Offline notification styles */
+        #offline-notification {
+            position: fixed;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #92400e;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 4px;
+            z-index: 1000;
+            display: none;
+        }
+
+        .container {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 1rem;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        #box-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+
+        #box-canvas.is-visible {
+            opacity: 1;
+        }
+
+        #app-content {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: bold;
+            margin-bottom: 4rem;
+            color: #fcd34d;
+        }
+
+        .instruction {
+            font-size: 2rem;
+            margin-bottom: 2rem;
+            color: #fdba74;
+        }
+
+        .countdown {
+            font-size: 4rem;
+            font-weight: bold;
+            margin-bottom: 2.5rem;
+            color: #ff6b6b;
+        }
+
+        .phase-tracker {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+            justify-content: center;
+            max-width: min(420px, 92vw);
+        }
+
+        .phase-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.35rem;
+            opacity: 0.55;
+            transform: translateY(0);
+            transition: opacity 0.25s ease, transform 0.25s ease;
+            font-size: 1rem;
+            color: #fde68a;
+        }
+
+        .phase-item.active {
+            opacity: 1;
+            transform: translateY(-6px);
+            color: var(--phase-color, #fde68a);
+        }
+
+        .phase-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 2px solid var(--phase-color, #fde68a);
+            background-color: var(--phase-soft, rgba(253, 230, 138, 0.25));
+            box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+            transition: background-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+        }
+
+        .phase-item.active .phase-dot {
+            background: radial-gradient(circle, var(--phase-color, #fde68a) 0%, rgba(0, 0, 0, 0) 70%);
+            box-shadow: 0 0 12px var(--phase-color, #fde68a);
+            transform: scale(1.05);
+        }
+
+        .phase-label {
+            letter-spacing: 0.05em;
+        }
+
+        .phase-item.active .phase-label {
+            color: inherit;
+        }
+
+        .prompt {
+            font-size: 1.5rem;
+            margin-bottom: 2rem;
+            color: #fde68a;
+        }
+
+        .complete {
+            font-size: 2rem;
+            margin-bottom: 2rem;
+            color: #4ade80;
+        }
+
+        .limit-warning {
+            margin-bottom: 1.5rem;
+            color: #f97316;
+            font-size: 1rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .timer {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            color: #fde68a;
+            z-index: 2;
+        }
+
+        .form-group {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1rem;
+            gap: 0.5rem;
+        }
+
+        .settings {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-bottom: 2rem;
+            gap: 1rem;
+        }
+
+        input[type="number"] {
+            background-color: #78350f;
+            color: #ffedd5;
+            border: 1px solid #d97706;
+            padding: 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 16px;
+        }
+
+        label {
+            color: #fde68a;
+            display: flex;
+            align-items: center;
+        }
+
+        button {
+            font-size: 1.25rem;
+            padding: 0.75rem 1.5rem;
+            background: linear-gradient(to bottom, #d97706, #b45309);
+            color: black;
+            border: none;
+            border-radius: 0.25rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            box-shadow: 0 3px 6px rgba(0, 0, 0, 0.4);
+        }
+
+        button:hover {
+            background: linear-gradient(to bottom, #b45309, #92400e);
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 48px;
+            height: 24px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #374151;
+            transition: .4s;
+            border-radius: 24px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: #d97706;
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(24px);
+        }
+
+        .icon {
+            display: inline-block;
+            vertical-align: middle;
+            width: 24px;
+            height: 24px;
+            stroke-width: 2;
+            stroke: currentColor;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .shortcut-buttons {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1.5rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .preset-button {
+            font-size: 1rem;
+            padding: 0.5rem 1rem;
+            background-color: #92400e;
+            color: #ffedd5;
+        }
+
+        .preset-button:hover {
+            background-color: #78350f;
+        }
+
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 200px;
+            height: 10px;
+            background: #78350f;
+            border-radius: 5px;
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #d97706;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        input[type="range"]::-moz-range-track {
+            width: 200px;
+            height: 10px;
+            background: #78350f;
+            border-radius: 5px;
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            background: #d97706;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        @media (max-width: 480px) {
+            h1 {
+                font-size: 2.2rem;
+                margin-bottom: 3rem;
+            }
+
+            .instruction {
+                font-size: 1.8rem;
+                margin-bottom: 1.75rem;
+            }
+
+            .countdown {
+                font-size: 3.5rem;
+                margin-bottom: 2rem;
+            }
+
+            .phase-tracker {
+                gap: 1.1rem;
+                margin-bottom: 1.5rem;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            button,
+            .slider,
+            input[type="range"] {
+                transition-duration: 0.01ms !important;
+                animation-duration: 0.01ms !important;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Offline notification div -->
+    <div id="offline-notification" style="display: none;">You are offline, but the app will work normally</div>
+
+    <div class="container">
+        <div id="app-content"></div>
+        <canvas id="box-canvas"></canvas>
+    </div>
+
+    <script src="app.js"></script>
+
+    <script>
+        // Service Worker Registration
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('service-worker.js')
+                    .then(registration => {
+                        console.log('ServiceWorker registration successful with scope: ', registration.scope);
+                    })
+                    .catch(error => {
+                        console.log('ServiceWorker registration failed: ', error);
+                    });
+            });
+        }
+    </script>
+</body>
+</html>
